@@ -40,4 +40,3 @@ echo "[*] CodeQL scan complete. Report written to ${CODEQL_REPORT}"
 
 #Post-processing
 python3 "${SCRIPT_DIR}/parse_reports.py" "${CPPCHECK_REPORT}" "${CODEQL_REPORT}"
-
