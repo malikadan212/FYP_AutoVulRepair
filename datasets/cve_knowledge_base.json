@@ -1,0 +1,158 @@
+{
+  "metadata": {
+    "version": "1.0",
+    "last_updated": "2025-09-17",
+    "description": "CVE knowledge base for vulnerability classification and repair patterns",
+    "total_entries": 10
+  },
+  "cve_entries": [
+    {
+      "cve_id": "CVE-2021-44228",
+      "cwe_id": "CWE-502",
+      "vulnerability_type": "injection",
+      "severity": "critical",
+      "description": "Apache Log4j2 JNDI features do not protect against attacker controlled LDAP and other JNDI related endpoints",
+      "affected_languages": ["java"],
+      "common_patterns": ["log4j", "jndi", "ldap"],
+      "repair_strategy": "upgrade_dependency"
+    },
+    {
+      "cve_id": "CVE-2020-1472",
+      "cwe_id": "CWE-330",
+      "vulnerability_type": "buffer_overflow",
+      "severity": "critical",
+      "description": "Buffer overflow in strcpy function without bounds checking",
+      "affected_languages": ["c", "cpp"],
+      "common_patterns": ["strcpy", "strcat", "sprintf", "gets"],
+      "repair_strategy": "replace_unsafe_function",
+      "safe_alternatives": {
+        "strcpy": "strncpy",
+        "strcat": "strncat", 
+        "sprintf": "snprintf",
+        "gets": "fgets"
+      }
+    },
+    {
+      "cve_id": "CVE-2019-11043",
+      "cwe_id": "CWE-120",
+      "vulnerability_type": "buffer_overflow",
+      "severity": "high",
+      "description": "Stack-based buffer overflow vulnerability",
+      "affected_languages": ["c", "cpp"],
+      "common_patterns": ["buffer", "overflow", "stack"],
+      "repair_strategy": "bounds_checking"
+    },
+    {
+      "cve_id": "CVE-2018-16065",
+      "cwe_id": "CWE-401",
+      "vulnerability_type": "memory_leak",
+      "severity": "medium",
+      "description": "Memory leak due to missing free() calls",
+      "affected_languages": ["c", "cpp"],
+      "common_patterns": ["malloc", "calloc", "new", "not freed"],
+      "repair_strategy": "add_memory_cleanup"
+    },
+    {
+      "cve_id": "CVE-2017-5638",
+      "cwe_id": "CWE-476",
+      "vulnerability_type": "null_pointer_dereference",
+      "severity": "high",
+      "description": "Null pointer dereference vulnerability",
+      "affected_languages": ["c", "cpp", "java"],
+      "common_patterns": ["null", "nullptr", "dereference"],
+      "repair_strategy": "null_check"
+    },
+    {
+      "cve_id": "CVE-2016-5195",
+      "cwe_id": "CWE-416",
+      "vulnerability_type": "use_after_free",
+      "severity": "high",
+      "description": "Use-after-free vulnerability in memory management",
+      "affected_languages": ["c", "cpp"],
+      "common_patterns": ["use after free", "freed memory", "dangling pointer"],
+      "repair_strategy": "pointer_nullification"
+    },
+    {
+      "cve_id": "CVE-2015-7547",
+      "cwe_id": "CWE-190",
+      "vulnerability_type": "integer_overflow",
+      "severity": "medium",
+      "description": "Integer overflow leading to buffer overflow",
+      "affected_languages": ["c", "cpp"],
+      "common_patterns": ["integer overflow", "arithmetic overflow"],
+      "repair_strategy": "overflow_checking"
+    },
+    {
+      "cve_id": "CVE-2014-0160",
+      "cwe_id": "CWE-134",
+      "vulnerability_type": "format_string",
+      "severity": "medium",
+      "description": "Format string vulnerability in printf family functions",
+      "affected_languages": ["c", "cpp"],
+      "common_patterns": ["printf", "sprintf", "format string"],
+      "repair_strategy": "format_string_validation"
+    },
+    {
+      "cve_id": "CVE-2013-2028",
+      "cwe_id": "CWE-457",
+      "vulnerability_type": "uninitialized_variable",
+      "severity": "low",
+      "description": "Use of uninitialized variable",
+      "affected_languages": ["c", "cpp"],
+      "common_patterns": ["uninitialized", "not initialized"],
+      "repair_strategy": "variable_initialization"
+    },
+    {
+      "cve_id": "CVE-2012-2459",
+      "cwe_id": "CWE-404",
+      "vulnerability_type": "resource_leak",
+      "severity": "medium",
+      "description": "Resource leak - file handles not properly closed",
+      "affected_languages": ["c", "cpp", "java"],
+      "common_patterns": ["file not closed", "handle leak", "resource leak"],
+      "repair_strategy": "resource_cleanup"
+    }
+  ],
+  "repair_patterns": {
+    "replace_unsafe_function": {
+      "description": "Replace unsafe C functions with safer alternatives",
+      "examples": [
+        {
+          "vulnerable": "strcpy(dest, src);",
+          "fixed": "strncpy(dest, src, sizeof(dest) - 1); dest[sizeof(dest) - 1] = '\\0';"
+        },
+        {
+          "vulnerable": "sprintf(buffer, format, args);",
+          "fixed": "snprintf(buffer, sizeof(buffer), format, args);"
+        }
+      ]
+    },
+    "bounds_checking": {
+      "description": "Add bounds checking before buffer operations",
+      "examples": [
+        {
+          "vulnerable": "char buffer[10]; strcpy(buffer, input);",
+          "fixed": "char buffer[10]; if(strlen(input) < sizeof(buffer)) strcpy(buffer, input);"
+        }
+      ]
+    },
+    "null_check": {
+      "description": "Add null pointer checks before dereferencing",
+      "examples": [
+        {
+          "vulnerable": "ptr->field = value;",
+          "fixed": "if(ptr != NULL) ptr->field = value;"
+        }
+      ]
+    },
+    "add_memory_cleanup": {
+      "description": "Add proper memory deallocation",
+      "examples": [
+        {
+          "vulnerable": "char* ptr = malloc(100); // missing free",
+          "fixed": "char* ptr = malloc(100); /* use ptr */ free(ptr); ptr = NULL;"
+        }
+      ]
+    }
+  }
+}

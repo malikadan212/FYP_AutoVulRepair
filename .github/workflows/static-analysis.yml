@@ -1,0 +1,107 @@
+name: Static Analysis Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+jobs:
+  static-analysis:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Build analysis container
+      run: |
+        docker build -t autovulrepair:latest .
+        
+    - name: Create artifacts directory
+      run: mkdir -p artifacts
+      
+    - name: Run static analysis
+      run: |
+        docker run --rm \
+          -v ${{ github.workspace }}/artifacts:/app/artifacts \
+          -v ${{ github.workspace }}/src:/app/src \
+          autovulrepair:latest \
+          /app/pipeline/static_scan.sh /app/src
+          
+    - name: Upload scan reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: static-analysis-reports
+        path: artifacts/
+        retention-days: 30
+        
+    - name: Parse and display results
+      if: always()
+      run: |
+        if [ -f artifacts/vulnerability-report-*.json ]; then
+          echo "## Vulnerability Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Extract summary from the latest report
+          LATEST_REPORT=$(ls -t artifacts/vulnerability-report-*.json | head -1)
+          
+          if [ -f "$LATEST_REPORT" ]; then
+            TOTAL=$(jq -r '.summary.total_vulnerabilities' "$LATEST_REPORT")
+            CRITICAL=$(jq -r '.summary.severity_breakdown.critical // 0' "$LATEST_REPORT")
+            HIGH=$(jq -r '.summary.severity_breakdown.high // 0' "$LATEST_REPORT")
+            MEDIUM=$(jq -r '.summary.severity_breakdown.medium // 0' "$LATEST_REPORT")
+            LOW=$(jq -r '.summary.severity_breakdown.low // 0' "$LATEST_REPORT")
+            
+            echo "**Total Vulnerabilities Found:** $TOTAL" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
+            echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Critical | $CRITICAL |" >> $GITHUB_STEP_SUMMARY
+            echo "| High     | $HIGH |" >> $GITHUB_STEP_SUMMARY
+            echo "| Medium   | $MEDIUM |" >> $GITHUB_STEP_SUMMARY
+            echo "| Low      | $LOW |" >> $GITHUB_STEP_SUMMARY
+            
+            # Fail the build if critical or high severity issues found
+            if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+              echo "❌ Build failed due to critical or high severity vulnerabilities" >> $GITHUB_STEP_SUMMARY
+              exit 1
+            else
+              echo "✅ No critical or high severity vulnerabilities found" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+        else
+          echo "⚠️ No vulnerability reports generated" >> $GITHUB_STEP_SUMMARY
+        fi
+
+  codeql-analysis:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: cpp
+        queries: security-and-quality
+        
+    - name: Build project
+      run: |
+        # Simple build for C++ files
+        g++ -c src/test.cpp -o src/test.o
+        
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:cpp"
