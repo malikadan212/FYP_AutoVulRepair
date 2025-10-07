@@ -130,6 +130,7 @@ jobs:
           
           # Copy changed files to temp directory
           echo "${{ steps.changed-files.outputs.files }}" | while read file; do
+            if [ -f "$file" ]; then
               cp "$file" temp_analysis/
             fi
           done
