@@ -1,0 +1,364 @@
+name: Auto-scan & Detect
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allow manual triggering
+    inputs:
+      scan_tool:
+        description: 'Tool to use (cppcheck, codeql, both)'
+        required: false
+        default: both
+        type: choice
+        options:
+          - cppcheck
+          - codeql
+          - both
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+jobs:
+  # Job 1: CodeQL Analysis (GitHub's native security scanning)
+  codeql-scan:
+    name: CodeQL Security Analysis
+    runs-on: ubuntu-latest
+    # Skip CodeQL job if user chose cppcheck-only
+    if: >-
+      ${{ !(
+            (github.event_name == 'workflow_dispatch' && inputs.scan_tool == 'cppcheck') ||
+            (github.event_name != 'workflow_dispatch' && (vars.SCAN_TOOL || 'both') == 'cppcheck')
+          ) }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: cpp
+          queries: security-and-quality
+
+      - name: Build project
+        run: |
+          # Build all C/C++ files for CodeQL analysis
+          find . -name "*.cpp" -o -name "*.c" | head -5 | while read file; do
+            echo "Building $file"
+            g++ -c "$file" -o "${file}.o" 2>/dev/null || true
+          done
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:cpp"
+
+  # Job 2: Comprehensive Vulnerability Scanning
+  vulnerability-scan:
+    name: Comprehensive Vulnerability Scanning
+    runs-on: ubuntu-latest
+    env:
+      SCAN_TOOL: ${{ inputs.scan_tool || vars.SCAN_TOOL || 'both' }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for git diff
+
+      - name: Build scanning container
+        run: |
+          echo "🔨 Building AutoVulRepair scanning container..."
+          docker build -t autovulrepair:latest .
+
+      - name: Get changed C/C++ files
+        id: changed-files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE_SHA="${{ github.event.before }}"
+          fi
+          
+          echo "Comparing against: $BASE_SHA"
+          echo "Selected tool: ${SCAN_TOOL}"
+          
+          # Get changed C/C++ files
+          CHANGED=$(git diff --name-only $BASE_SHA HEAD -- '*.c' '*.cpp' '*.cc' '*.cxx' '*.h' '*.hpp' 2>/dev/null || echo "")
+          
+          if [ -z "$CHANGED" ]; then
+            echo "No C/C++ files changed"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "files=" >> $GITHUB_OUTPUT
+          else
+            echo "Changed files:"
+            echo "$CHANGED"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "files<<EOF" >> $GITHUB_OUTPUT
+            echo "$CHANGED" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Cppcheck on changed files
+        if: steps.changed-files.outputs.has_changes == 'true' && env.SCAN_TOOL != 'codeql'
+        run: |
+          echo "🔍 Running Cppcheck analysis..."
+          mkdir -p artifacts
+          
+          # Run Cppcheck on changed files
+          echo "${{ steps.changed-files.outputs.files }}" | while read file; do
+            if [ -f "$file" ]; then
+              echo "Analyzing: $file"
+              cppcheck --enable=warning,style,performance,portability --inconclusive \
+                --xml --xml-version=2 "$file" 2>> artifacts/cppcheck-results.xml || true
+            fi
+          done
+          
+          echo "Cppcheck analysis complete"
+
+      - name: Run comprehensive static analysis
+        if: steps.changed-files.outputs.has_changes == 'true'
+        run: |
+          echo "🔍 Running comprehensive vulnerability analysis..."
+          
+          # Create temporary directory for analysis
+          mkdir -p temp_analysis
+          
+          # Copy changed files to temp directory
+          echo "${{ steps.changed-files.outputs.files }}" | while read file; do
+              cp "$file" temp_analysis/
+            fi
+          done
+          
+          # Run analysis in container
+          TOOL="${{ inputs.scan_tool || vars.SCAN_TOOL || 'both' }}"
+          echo "Using analysis tool: ${TOOL}"
+          docker run --rm \
+            -v ${{ github.workspace }}/artifacts:/app/artifacts \
+            -v ${{ github.workspace }}/temp_analysis:/app/scan_target \
+            autovulrepair:latest \
+            /app/pipeline/static_scan.sh --tool "${TOOL}" /app/scan_target
+
+      - name: Analyze scan results
+        if: steps.changed-files.outputs.has_changes == 'true'
+        id: analysis
+        run: |
+          echo "Analyzing vulnerability scan results..."
+
+          # Check if vulnerability reports were generated
+          if ls artifacts/vulnerability-report-*.json 1> /dev/null 2>&1; then
+            LATEST_REPORT=$(ls -t artifacts/vulnerability-report-*.json | head -1)
+            TOTAL_VULNS=$(jq -r '.summary.total_vulnerabilities // 0' "$LATEST_REPORT")
+            CRITICAL_VULNS=$(jq -r '.summary.severity_breakdown.critical // 0' "$LATEST_REPORT")
+            HIGH_VULNS=$(jq -r '.summary.severity_breakdown.high // 0' "$LATEST_REPORT")
+
+            echo "has_vulnerabilities=true" >> $GITHUB_OUTPUT
+            echo "total_vulnerabilities=$TOTAL_VULNS" >> $GITHUB_OUTPUT
+            echo "critical_vulnerabilities=$CRITICAL_VULNS" >> $GITHUB_OUTPUT
+            echo "high_vulnerabilities=$HIGH_VULNS" >> $GITHUB_OUTPUT
+            
+            echo "Found $TOTAL_VULNS total vulnerabilities ($CRITICAL_VULNS critical, $HIGH_VULNS high)"
+          else
+            echo "has_vulnerabilities=false" >> $GITHUB_OUTPUT
+            echo "No vulnerability reports generated"
+          fi
+
+      - name: Upload analysis artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vulnerability-analysis-${{ github.sha }}
+          path: |
+            artifacts/
+          retention-days: 30
+
+      - name: Create vulnerability summary
+        if: steps.changed-files.outputs.has_changes == 'true'
+        run: |
+          echo "## 🔍 Vulnerability Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Check vulnerability report
+          if ls artifacts/vulnerability-report-*.json 1> /dev/null 2>&1; then
+            LATEST_REPORT=$(ls -t artifacts/vulnerability-report-*.json | head -1)
+            if [ -f "$LATEST_REPORT" ]; then
+              TOTAL_VULNS=$(jq -r '.summary.total_vulnerabilities // 0' "$LATEST_REPORT")
+              CRITICAL_VULNS=$(jq -r '.summary.severity_breakdown.critical // 0' "$LATEST_REPORT")
+              HIGH_VULNS=$(jq -r '.summary.severity_breakdown.high // 0' "$LATEST_REPORT")
+              MEDIUM_VULNS=$(jq -r '.summary.severity_breakdown.medium // 0' "$LATEST_REPORT")
+              LOW_VULNS=$(jq -r '.summary.severity_breakdown.low // 0' "$LATEST_REPORT")
+              
+              echo "### 📊 Vulnerability Detection Summary:" >> $GITHUB_STEP_SUMMARY
+              echo "- **Total vulnerabilities detected**: $TOTAL_VULNS" >> $GITHUB_STEP_SUMMARY
+              echo "- **Critical**: $CRITICAL_VULNS" >> $GITHUB_STEP_SUMMARY
+              echo "- **High**: $HIGH_VULNS" >> $GITHUB_STEP_SUMMARY
+              echo "- **Medium**: $MEDIUM_VULNS" >> $GITHUB_STEP_SUMMARY
+              echo "- **Low**: $LOW_VULNS" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              
+              # Check for critical vulnerabilities file
+              if ls artifacts/critical-vulnerabilities-*.json 1> /dev/null 2>&1; then
+                CRITICAL_FILE=$(ls -t artifacts/critical-vulnerabilities-*.json | head -1)
+                CRITICAL_COUNT=$(jq -r '.metadata.total_critical // 0' "$CRITICAL_FILE")
+                FILES_COUNT=$(jq -r '.dynamic_analysis_targets.files_to_analyze | length' "$CRITICAL_FILE")
+                
+                echo "### 🚨 Critical Vulnerabilities for Module 3:" >> $GITHUB_STEP_SUMMARY
+                echo "- **Critical vulnerabilities file**: \`$(basename "$CRITICAL_FILE")\`" >> $GITHUB_STEP_SUMMARY
+                echo "- **Critical issues found**: $CRITICAL_COUNT" >> $GITHUB_STEP_SUMMARY
+                echo "- **Files requiring dynamic analysis**: $FILES_COUNT" >> $GITHUB_STEP_SUMMARY
+                echo "- **Status**: Ready for Module 3 (Dynamic Analysis)" >> $GITHUB_STEP_SUMMARY
+                echo "" >> $GITHUB_STEP_SUMMARY
+              elif [ "$CRITICAL_VULNS" -gt 0 ]; then
+                echo "### ⚠️ Critical Vulnerabilities:" >> $GITHUB_STEP_SUMMARY
+                echo "- **$CRITICAL_VULNS critical issues found**" >> $GITHUB_STEP_SUMMARY
+                echo "" >> $GITHUB_STEP_SUMMARY
+              fi
+              
+              if [ "$TOTAL_VULNS" -gt 0 ]; then
+                echo "### 🔍 Vulnerability Types Detected:" >> $GITHUB_STEP_SUMMARY
+                jq -r '.summary.type_breakdown | to_entries[] | select(.value > 0) | "- **\(.key | gsub("_"; " ") | ascii_upcase)**: \(.value)"' "$LATEST_REPORT" >> $GITHUB_STEP_SUMMARY
+                echo "" >> $GITHUB_STEP_SUMMARY
+                jq -r '.summary.tool_breakdown | to_entries[] | "- **\(.key)**: \(.value) issues"' "$LATEST_REPORT" >> $GITHUB_STEP_SUMMARY
+              fi
+            fi
+          else
+            echo "**No vulnerability reports generated**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "This could indicate:" >> $GITHUB_STEP_SUMMARY
+            echo "- No vulnerabilities found (good!)" >> $GITHUB_STEP_SUMMARY
+            echo "- Analysis tools encountered issues" >> $GITHUB_STEP_SUMMARY
+            echo "- Changed files don't contain C/C++ code" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Comment on PR with scan results
+        if: steps.analysis.outputs.has_vulnerabilities == 'true' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const { glob } = require('glob');
+            
+            let comment = `## 🔍 Vulnerability Scan Results\n\n`;
+            
+            // Read vulnerability report if available
+            try {
+              const reportFiles = await glob('artifacts/vulnerability-report-*.json');
+              if (reportFiles.length > 0) {
+                const reportPath = reportFiles[0];
+                const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+                
+                const total = report.summary.total_vulnerabilities || 0;
+                const critical = report.summary.severity_breakdown.critical || 0;
+                const high = report.summary.severity_breakdown.high || 0;
+                const medium = report.summary.severity_breakdown.medium || 0;
+                const low = report.summary.severity_breakdown.low || 0;
+                
+                comment += `### 📊 Detection Summary\n`;
+                comment += `- **Total vulnerabilities**: ${total}\n`;
+                comment += `- **Critical**: ${critical}\n`;
+                comment += `- **High**: ${high}\n`;
+                comment += `- **Medium**: ${medium}\n`;
+                comment += `- **Low**: ${low}\n\n`;
+                
+                if (total > 0) {
+                  comment += `### 🔍 Vulnerability Types Found\n`;
+                  Object.entries(report.summary.type_breakdown || {}).forEach(([type, count]) => {
+                    if (count > 0) {
+                      comment += `- **${type.replace(/_/g, ' ').toUpperCase()}**: ${count}\n`;
+                    }
+                  });
+                  comment += `\n`;
+                  
+                  comment += `### 🛠️ Analysis Tools\n`;
+                  Object.entries(report.summary.tool_breakdown || {}).forEach(([tool, count]) => {
+                    comment += `- **${tool}**: ${count} issues\n`;
+                  });
+                  comment += `\n`;
+                }
+                
+                // Check for critical vulnerabilities file
+                const criticalFiles = await glob('artifacts/critical-vulnerabilities-*.json');
+                if (criticalFiles.length > 0 && critical > 0) {
+                  const criticalFile = criticalFiles[0];
+                  const criticalData = JSON.parse(fs.readFileSync(criticalFile, 'utf8'));
+                  const filesCount = criticalData.dynamic_analysis_targets?.files_to_analyze?.length || 0;
+                  
+                  comment += `### 🚨 Critical Vulnerabilities - Module 3 Ready\n`;
+                  comment += `- **Critical vulnerabilities file**: \`${criticalFile.split('/').pop()}\`\n`;
+                  comment += `- **Files requiring dynamic analysis**: ${filesCount}\n`;
+                  comment += `- **Status**: Ready for Module 3 (Dynamic Analysis)\n\n`;
+                }
+                
+                if (critical > 0 || high > 0) {
+                  comment += `### ⚠️ Action Required\n`;
+                  comment += `This PR introduces **${critical + high} critical/high severity vulnerabilities**.\n`;
+                  comment += `Please review and fix these issues before merging.\n\n`;
+                } else if (total > 0) {
+                  comment += `### ✅ Low Risk\n`;
+                  comment += `Only medium/low severity issues detected. Consider addressing them when convenient.\n\n`;
+                } else {
+                  comment += `### ✅ Clean Scan\n`;
+                  comment += `No vulnerabilities detected in the changed files!\n\n`;
+                }
+              }
+            } catch (error) {
+              comment += `⚠️ Could not read vulnerability report: ${error.message}\n\n`;
+            }
+            
+            comment += `### 📋 Next Steps\n`;
+            comment += `1. Review the detailed vulnerability report in the workflow artifacts\n`;
+            comment += `2. Address critical and high severity issues\n`;
+            comment += `3. Consider fixing medium/low severity issues\n`;
+            comment += `4. Re-run the scan after making fixes\n\n`;
+            comment += `*Scan performed by AutoVulRepair Detection System*`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      - name: Security gate check
+        if: steps.changed-files.outputs.has_changes == 'true'
+        run: |
+          # Check if there are critical/high vulnerabilities that should fail the build
+          if ls artifacts/vulnerability-report-*.json 1> /dev/null 2>&1; then
+            LATEST_REPORT=$(ls -t artifacts/vulnerability-report-*.json | head -1)
+            if [ -f "$LATEST_REPORT" ]; then
+              CRITICAL=$(jq -r '.summary.severity_breakdown.critical // 0' "$LATEST_REPORT")
+              HIGH=$(jq -r '.summary.severity_breakdown.high // 0' "$LATEST_REPORT")
+              TOTAL=$(jq -r '.summary.total_vulnerabilities // 0' "$LATEST_REPORT")
+              
+              echo "🔍 Security Gate Results:"
+              echo "  Critical: $CRITICAL"
+              echo "  High: $HIGH"
+              echo "  Total: $TOTAL"
+              
+              # Fail build on critical vulnerabilities
+              if [ "$CRITICAL" -gt 0 ]; then
+                echo "❌ Build FAILED: $CRITICAL critical vulnerabilities detected"
+                echo "Critical vulnerabilities must be fixed before merging"
+                exit 1
+              fi
+              
+              # Warn on high vulnerabilities (but don't fail)
+              if [ "$HIGH" -gt 3 ]; then
+                echo "⚠️  WARNING: $HIGH high severity vulnerabilities found (threshold: 3)"
+                echo "Consider fixing these before merging"
+                echo "You can override this by reviewing the security implications"
+              fi
+              
+              if [ "$TOTAL" -eq 0 ]; then
+                echo "✅ No vulnerabilities detected - security gate passed"
+              else
+                echo "✅ Security gate passed (no critical vulnerabilities)"
+              fi
+            fi
+          else
+            echo "✅ No vulnerability reports found - assuming clean scan"
+          fi

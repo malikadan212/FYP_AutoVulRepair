@@ -29,11 +29,11 @@ WORKDIR /app
 # Copy application files
 COPY pipeline/ ./pipeline/
 COPY src/ ./src/
-COPY tools/ ./tools/
 COPY datasets/ ./datasets/
+COPY generate_critical_report.py ./
 
 # Set executable permissions
-RUN chmod +x /app/pipeline/static_scan.sh /app/pipeline/parse_reports.py
+RUN chmod +x /app/pipeline/static_scan.sh /app/pipeline/parse_reports.py /app/generate_critical_report.py
 
 # Create artifacts directory
 RUN mkdir -p /app/artifacts

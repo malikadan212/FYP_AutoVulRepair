@@ -284,6 +284,123 @@ class ReportGenerator:
             json.dump(data, f, indent=2, default=str)
         
         print(f"[*] JSON report saved to: {output_file}")
+        
+        # Generate critical vulnerabilities file for dynamic analysis
+        self.save_critical_vulnerabilities(vulnerabilities, output_file)
+    
+    def save_critical_vulnerabilities(self, vulnerabilities: List[Vulnerability], base_output_file: str):
+        """Save critical vulnerabilities in a separate file for dynamic analysis module"""
+        critical_vulns = [v for v in vulnerabilities if v.severity == Severity.CRITICAL]
+        
+        if not critical_vulns:
+            print("[*] No critical vulnerabilities found - no critical file generated")
+            return
+        
+        # Generate critical vulnerabilities file path
+        base_dir = os.path.dirname(base_output_file)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        critical_file = os.path.join(base_dir, f"critical-vulnerabilities-{timestamp}.json")
+        
+        # Prepare data for dynamic analysis
+        critical_data = {
+            "metadata": {
+                "generated_at": datetime.now().isoformat(),
+                "total_critical": len(critical_vulns),
+                "purpose": "Input for dynamic analysis module",
+                "source_report": os.path.basename(base_output_file)
+            },
+            "critical_vulnerabilities": [
+                {
+                    "id": v.id,
+                    "type": v.type.value,
+                    "severity": v.severity.value,
+                    "file_path": v.file_path,
+                    "line": v.line,
+                    "column": v.column,
+                    "message": v.message,
+                    "cwe_id": v.cwe_id,
+                    "tool": v.tool,
+                    "rule_id": v.rule_id,
+                    "description": v.description,
+                    "priority_score": self._calculate_priority_score(v)
+                }
+                for v in critical_vulns
+            ],
+            "dynamic_analysis_targets": self._generate_dynamic_targets(critical_vulns)
+        }
+        
+        with open(critical_file, 'w') as f:
+            json.dump(critical_data, f, indent=2, default=str)
+        
+        print(f"[*] Critical vulnerabilities file saved to: {critical_file}")
+        print(f"[*] Found {len(critical_vulns)} critical vulnerabilities for dynamic analysis")
+    
+    def _calculate_priority_score(self, vulnerability: Vulnerability) -> int:
+        """Calculate priority score for dynamic analysis (1-10, 10 = highest priority)"""
+        base_score = 10  # Critical = highest priority
+        
+        # Adjust based on vulnerability type
+        high_priority_types = [
+            VulnType.BUFFER_OVERFLOW,
+            VulnType.USE_AFTER_FREE,
+            VulnType.NULL_POINTER
+        ]
+        
+        if vulnerability.type in high_priority_types:
+            return base_score
+        else:
+            return base_score - 1
+    
+    def _generate_dynamic_targets(self, critical_vulns: List[Vulnerability]) -> Dict[str, Any]:
+        """Generate targets and suggestions for dynamic analysis"""
+        targets = {
+            "files_to_analyze": list(set(v.file_path for v in critical_vulns)),
+            "functions_to_test": [],
+            "test_cases_needed": [],
+            "analysis_suggestions": []
+        }
+        
+        # Group by vulnerability type for targeted testing
+        vuln_by_type = {}
+        for v in critical_vulns:
+            vtype = v.type.value
+            if vtype not in vuln_by_type:
+                vuln_by_type[vtype] = []
+            vuln_by_type[vtype].append(v)
+        
+        # Generate specific test suggestions
+        for vtype, vulns in vuln_by_type.items():
+            if vtype == "buffer_overflow":
+                targets["test_cases_needed"].extend([
+                    f"Test {v.file_path}:{v.line} with oversized input",
+                    f"Boundary testing for buffer at {v.file_path}:{v.line}"
+                    for v in vulns
+                ])
+                targets["analysis_suggestions"].append(
+                    "Use fuzzing tools (AFL, libFuzzer) to test buffer boundaries"
+                )
+            
+            elif vtype == "null_pointer_dereference":
+                targets["test_cases_needed"].extend([
+                    f"Test {v.file_path}:{v.line} with NULL inputs",
+                    f"Memory allocation failure simulation at {v.file_path}:{v.line}"
+                    for v in vulns
+                ])
+                targets["analysis_suggestions"].append(
+                    "Use Valgrind or AddressSanitizer for runtime detection"
+                )
+            
+            elif vtype == "use_after_free":
+                targets["test_cases_needed"].extend([
+                    f"Test memory access patterns at {v.file_path}:{v.line}",
+                    f"Double-free detection at {v.file_path}:{v.line}"
+                    for v in vulns
+                ])
+                targets["analysis_suggestions"].append(
+                    "Use AddressSanitizer (ASan) for use-after-free detection"
+                )
+        
+        return targets
 
 def main():
     if len(sys.argv) < 3:
